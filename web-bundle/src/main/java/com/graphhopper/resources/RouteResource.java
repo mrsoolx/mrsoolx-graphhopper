@@ -17,10 +17,10 @@
  */
 package com.graphhopper.resources;
 
-import com.graphhopper.GHRequest;
-import com.graphhopper.GHResponse;
-import com.graphhopper.GraphHopper;
-import com.graphhopper.GraphHopperConfig;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.graphhopper.*;
 import com.graphhopper.gpx.GpxConversions;
 import com.graphhopper.http.GHPointParam;
 import com.graphhopper.http.GHRequestTransformer;
@@ -28,10 +28,14 @@ import com.graphhopper.http.ProfileResolver;
 import com.graphhopper.jackson.MultiException;
 import com.graphhopper.jackson.ResponsePathSerializer;
 import com.graphhopper.util.*;
+import com.graphhopper.util.exceptions.GHException;
+import com.graphhopper.util.exceptions.PointNotFoundException;
 import com.graphhopper.util.shapes.GHPoint;
 import io.dropwizard.jersey.params.AbstractParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -39,14 +43,16 @@ import javax.servlet.http.HttpServletRequest;
 import javax.validation.constraints.NotNull;
 import javax.ws.rs.*;
 import javax.ws.rs.core.*;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.graphhopper.util.Parameters.Details.PATH_DETAILS;
 import static com.graphhopper.util.Parameters.Routing.*;
 import static java.util.stream.Collectors.toList;
+import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 
 /**
  * Resource to use GraphHopper in a remote client application like mobile or browser. Note: If type
@@ -231,6 +237,95 @@ public class RouteResource {
         }
     }
 
+    @POST
+    @Path("bulk")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces({MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML, "application/gpx+xml"})
+    public Response doPost(
+            @Context HttpServletRequest httpReq,
+            @Context UriInfo uriInfo,
+            @QueryParam(WAY_POINT_MAX_DISTANCE) @DefaultValue("0.5") double minPathPrecision,
+            BulkRouteRequest bulkRouteRequest,
+            @QueryParam("type") @DefaultValue("json") String type,
+            @QueryParam(INSTRUCTIONS) @DefaultValue("true") boolean instructions,
+            @QueryParam(CALC_POINTS) @DefaultValue("true") boolean calcPoints,
+            @QueryParam("profile") @DefaultValue("car") String profile,
+//            @QueryParam("weighting") @DefaultValue("fastest") String weighting,
+            @QueryParam(ALGORITHM) @DefaultValue("") String algoStr,
+            @QueryParam("locale") @DefaultValue("en") String localeStr,
+            @QueryParam(Parameters.Details.PATH_DETAILS) List<String> pathDetails) {
+        boolean writeGPX = "gpx".equalsIgnoreCase(type);
+        instructions = writeGPX || instructions;
+
+        StopWatch sw = new StopWatch().start();
+        List<GHPoint> points = new ArrayList<>();
+        points.add(bulkRouteRequest.getOriginPoint());
+        for(Destination destination: bulkRouteRequest.getDestinations()){
+            points.add(destination.getDestinationPoint());
+        }
+        if(points.isEmpty()) {
+            throw new WebApplicationException(errorResponse(new IllegalArgumentException("You have to pass at least one point"), writeGPX));
+        }
+//        if (!encodingManager.supports(vehicleStr)) {
+//            throw new WebApplicationException(errorResponse(new IllegalArgumentException("Vehicle not supported: " + vehicleStr), writeGPX));
+//        }
+        if(bulkRouteRequest.getDestinations().isEmpty()){
+            throw new WebApplicationException(errorResponse(new IllegalArgumentException("You have to pass at least destination"), writeGPX));
+        }
+        ObjectNode json = JsonNodeFactory.instance.objectNode();
+        final ObjectNode info = json.putObject("info");
+        info.putArray("copyrights")
+                .add("Swift Routes")
+                .add("powered by GraphHopper");
+        ArrayNode jsonPathList = json.putArray("data");
+        List<GHPoint> requestPoints = new ArrayList<>();
+        for(Destination destination: bulkRouteRequest.getDestinations()){
+            requestPoints.clear();
+            requestPoints.add(bulkRouteRequest.getOriginPoint());
+            requestPoints.add(destination.getDestinationPoint());
+            GHRequest request;
+            request = new GHRequest(requestPoints);
+            initHints(request.getHints(), uriInfo.getQueryParameters());
+            request.setProfile(profile).
+//                    setVehicle(encodingManager.getEncoder(vehicleStr).toString()).
+//                    setWeighting(weighting).
+        setAlgorithm(algoStr).
+                    setLocale(localeStr).
+                    setPathDetails(pathDetails).
+                    getHints().
+                    putObject(CALC_POINTS, calcPoints).
+                    putObject(INSTRUCTIONS, instructions).
+                    putObject(WAY_POINT_MAX_DISTANCE, minPathPrecision);
+            GHResponse ghResponse = null;
+            try {
+                ghResponse = graphHopper.route(request);
+            } catch (PointNotFoundException e){
+                ObjectNode jsonPath = jsonPathList.addObject();
+                jsonPath.put("id", destination.getId());
+                for(Throwable error: ghResponse.getErrors()){
+                    jsonPath.put("error", error.getMessage());
+                }
+            }
+
+            if (ghResponse.hasErrors()) {
+                //throw new WebApplicationException(errorResponse(ghResponse.getErrors(), writeGPX));
+                ObjectNode jsonPath = jsonPathList.addObject();
+                jsonPath.put("id", destination.getId());
+                for(Throwable error: ghResponse.getErrors()){
+                    jsonPath.put("error", error.getMessage());
+                }
+            } else {
+                for (ResponsePath ar : ghResponse.getAll()) {
+                    ObjectNode jsonPath = jsonPathList.addObject();
+                    jsonPath.put("id", destination.getId());
+                    jsonPath.put("distance", Helper.round(ar.getDistance(), 3));
+                    jsonPath.put("time", ar.getTime());
+                }
+            }
+        }
+        return Response.ok(json).build();
+    }
+
     public static void removeLegacyParameters(PMap hints) {
         // these parameters should only be used to resolve the profile, but should not be passed to GraphHopper
         hints.remove("weighting");
@@ -264,5 +359,77 @@ public class RouteResource {
                 // see also #1976
             }
         }
+    }
+
+    private Response errorResponse(List<Throwable> t, boolean writeGPX) {
+        if (writeGPX) {
+            return xmlErrorResponse(t);
+        } else {
+            return jsonErrorResponse(t);
+        }
+    }
+
+    private Response errorResponse(Throwable t, boolean writeGPX) {
+        return errorResponse(Collections.singletonList(t), writeGPX);
+    }
+
+    private Response jsonErrorResponse(List<Throwable> errors) {
+        ObjectNode json = JsonNodeFactory.instance.objectNode();
+        json.put("message", getMessage(errors.get(0)));
+        ArrayNode errorHintList = json.putArray("hints");
+        for (Throwable t : errors) {
+            ObjectNode error = errorHintList.addObject();
+            error.put("message", getMessage(t));
+            error.put("details", t.getClass().getName());
+            if (t instanceof GHException) {
+                ((GHException) t).getDetails().forEach(error::putPOJO);
+            }
+        }
+        return Response.status(SC_BAD_REQUEST).entity(json).build();
+    }
+
+    private Response xmlErrorResponse(Collection<Throwable> list) {
+        if (list.isEmpty())
+            throw new RuntimeException("errorsToXML should not be called with an empty list");
+
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            Document doc = builder.newDocument();
+            Element gpxElement = doc.createElement("gpx");
+            gpxElement.setAttribute("creator", "GraphHopper");
+            gpxElement.setAttribute("version", "1.1");
+            doc.appendChild(gpxElement);
+
+            Element mdElement = doc.createElement("metadata");
+            gpxElement.appendChild(mdElement);
+
+            Element extensionsElement = doc.createElement("extensions");
+            mdElement.appendChild(extensionsElement);
+
+            Element messageElement = doc.createElement("message");
+            extensionsElement.appendChild(messageElement);
+            messageElement.setTextContent(list.iterator().next().getMessage());
+
+            Element hintsElement = doc.createElement("hints");
+            extensionsElement.appendChild(hintsElement);
+
+            for (Throwable t : list) {
+                Element error = doc.createElement("error");
+                hintsElement.appendChild(error);
+                error.setAttribute("message", t.getMessage());
+                error.setAttribute("details", t.getClass().getName());
+            }
+            return Response.status(SC_BAD_REQUEST).entity(doc).build();
+        } catch (ParserConfigurationException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String getMessage(Throwable t) {
+        if (t.getMessage() == null)
+            return t.getClass().getSimpleName();
+        else
+            return t.getMessage();
     }
 }
