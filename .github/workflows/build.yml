@@ -27,7 +27,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ secrets.AWS_ECR_REPOSITORY_URI_DEV }}
+          docker build -t ${{ secrets.AWS_ECR_REPOSITORY_URI_DEV }} .
 
       - name: Tag Docker image
         run: |
