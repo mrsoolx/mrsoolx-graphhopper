@@ -4,14 +4,14 @@ import com.graphhopper.util.shapes.GHPoint;
 
 public class Destination {
 
-    private Long id;
+    private String id;
     private GHPoint destinationPoint;
 
-    public Long getId() {
+    public String getId() {
         return id;
     }
 
-    public void setId(Long id) {
+    public void setId(String id) {
         this.id = id;
     }
 
