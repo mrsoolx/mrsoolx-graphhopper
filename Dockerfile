@@ -12,6 +12,7 @@ RUN mkdir -p /data
 WORKDIR /graphhopper
 COPY --from=build /graphhopper/web/target/graphhopper-web-11.0-SNAPSHOT.jar ./
 COPY graphhopper.sh config-example.yml ./
+RUN chmod +x ./graphhopper.sh
 VOLUME ["./data"]
 EXPOSE 8989 8990
 ENTRYPOINT [ "./graphhopper.sh", "-c", "config-example.yml" ]
