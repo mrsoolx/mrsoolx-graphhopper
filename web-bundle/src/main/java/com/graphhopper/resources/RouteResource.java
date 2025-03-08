@@ -281,8 +281,8 @@ public class RouteResource {
         List<GHPoint> requestPoints = new ArrayList<>();
         for(Destination destination: bulkRouteRequest.getDestinations()){
             requestPoints.clear();
-            requestPoints.add(bulkRouteRequest.getOriginPoint());
             requestPoints.add(destination.getDestinationPoint());
+            requestPoints.add(bulkRouteRequest.getOriginPoint());
             GHRequest request;
             request = new GHRequest(requestPoints);
             initHints(request.getHints(), uriInfo.getQueryParameters());
